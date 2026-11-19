@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-# pdf-serve — serve a directory over HTTP; a PDF opens in a pdf.js viewer that
+# synctex-serve — serve a directory over HTTP; a PDF opens in a pdf.js viewer that
 # re-renders in place, keeping its page and scroll position, when the file
 # changes on disk (e.g. after latexmk). Append ?raw to a PDF's URL for the file.
-#   pdf-serve [dir] [--port=8000] [--bind=127.0.0.1]
+#   synctex-serve [dir] [--port=8000] [--bind=127.0.0.1]
 
 import argparse
 import functools
