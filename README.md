@@ -47,10 +47,16 @@ vim.g.vimtex_view_general_viewer = "synctex-serve"
 vim.g.vimtex_view_general_options = "forward @line @col @tex @pdf --bind=0.0.0.0"
 ```
 
+Run from nvim, `forward` reports its outcome in nvim's message line (`vim.notify`): the page and how many viewers got
+it, or why not. A viewer that was disconnected at the time, such as a tablet tab suspended while the terminal was in
+front, gets the latest jump when it reconnects.
+
 Inside display math (`align`, `equation`) TeX records no box per source line, so a lookup there lands on the nearest
 line that has one, usually the text around the equation.
 
-## Roadmap
+## Inverse search
 
-Inverse search: a double-tap in the viewer jumps nvim to the source line, through nvim's RPC socket and
-`vimtex#view#inverse_search`.
+A double tap (or a double click) on a page puts nvim on the source line typeset there, through vimtex
+(`vimtex#view#inverse_search`, which opens the file if needed). The server reaches nvim through the socket `forward`
+sends along (`$NVIM`, set by nvim for the jobs it starts), so it is the nvim that last ran a forward search: after
+starting nvim or the server, press `\lv` once. The bar shows where nvim went, or why it could not.
