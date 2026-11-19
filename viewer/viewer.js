@@ -283,7 +283,9 @@ function listen() {
   events.addEventListener('pdf', event => requestLoad(JSON.parse(event.data).stamp));
   events.addEventListener('jump', event => jump(JSON.parse(event.data)));
   events.onopen = () => { statusEl.textContent = shownStamp === null ? 'waiting for the PDF' : updatedText; };
-  events.onerror = () => { statusEl.textContent = 'server unreachable'; };
+  events.onerror = () => {
+    statusEl.textContent = events.readyState === EventSource.CLOSED ? 'server unreachable' : 'reconnecting…';
+  };
 }
 
 document.getElementById('zoom_in').onclick = () => { zoom = clampZoom(zoom * 1.25); relayout(); };

@@ -28,34 +28,44 @@ FORWARD_PATH = '/.synctex/forward'
 # run, and a viewer that loads it midway gets a truncated file.
 SETTLE_SECONDS = 0.3
 KEEPALIVE_SECONDS = 15
+# How soon a viewer reconnects after its stream drops, e.g. when its tab comes back from the background.
+RECONNECT_MS = 500
 SERVER_START_SECONDS = 5
 
 VIEWER_DIR = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'viewer')
 VIEWER_PATH = '/.synctex/'
 
 
-# The open event streams, each a queue of the events for the PDF its viewer shows.
+# The open event streams, each a queue of the jumps for the PDF its viewer shows, and each PDF's latest jump: a viewer
+# whose stream dropped (iOS suspends a tab in the background) missed the jumps sent meanwhile, and on reconnecting it
+# gets the latest one it has not seen. A jump's id is the time it was published, so ids stay ordered across restarts.
 class Subscribers:
 
     def __init__(self):
         self.lock = threading.Lock()
         self.pdf_paths = {}
+        self.latest_jumps = {}
 
-    def subscribe(self, pdf_path):
-        events = queue.Queue()
+    def subscribe(self, pdf_path, seen_jump_id):
+        jumps = queue.Queue()
         with self.lock:
-            self.pdf_paths[events] = pdf_path
-        return events
+            self.pdf_paths[jumps] = pdf_path
+            latest = self.latest_jumps.get(pdf_path)
+            if seen_jump_id is not None and latest is not None and latest[0] > seen_jump_id:
+                jumps.put(latest)
+        return jumps
 
-    def unsubscribe(self, events):
+    def unsubscribe(self, jumps):
         with self.lock:
-            del self.pdf_paths[events]
+            del self.pdf_paths[jumps]
 
-    def publish(self, pdf_path, event):
+    def publish(self, pdf_path, jump):
         with self.lock:
-            matching = [events for events, path in self.pdf_paths.items() if path == pdf_path]
-        for events in matching:
-            events.put(event)
+            entry = (time.time_ns(), jump)
+            self.latest_jumps[pdf_path] = entry
+            matching = [jumps for jumps, path in self.pdf_paths.items() if path == pdf_path]
+            for jumps in matching:
+                jumps.put(entry)
         return len(matching)
 
 
@@ -110,13 +120,17 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.wfile.write(body)
 
     # Server-Sent Events for one PDF: 'pdf' with the file's stamp whenever it has settled on a new one, the first time
-    # on connecting, and 'jump' with a forward search's page and boxes. The stream ends when the viewer goes away.
+    # on connecting, and 'jump' with a forward search's page and boxes, its id the browser sends back as Last-Event-ID
+    # when it reconnects. The stream ends when the viewer goes away.
     def send_events(self, pdf_path):
         self.send_response(200)
         self.send_header('Content-Type', 'text/event-stream')
         self.end_headers()
+        self.wfile.write(f'retry: {RECONNECT_MS}\n\n'.encode())
         file_path = self.translate_path(pdf_path)
-        events = self.server.subscribers.subscribe(pdf_path)
+        last_event_id = self.headers.get('Last-Event-ID')
+        seen_jump_id = int(last_event_id) if last_event_id and last_event_id.isdigit() else None
+        jumps = self.server.subscribers.subscribe(pdf_path, seen_jump_id)
         sent_stamp = seen_stamp = None
         last_write = time.monotonic()
         try:
@@ -128,7 +142,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     last_write = time.monotonic()
                 seen_stamp = stamp
                 try:
-                    self.write_event('jump', events.get(timeout=SETTLE_SECONDS))
+                    jump_id, jump = jumps.get(timeout=SETTLE_SECONDS)
+                    self.write_event('jump', jump, jump_id)
                     last_write = time.monotonic()
                 except queue.Empty:
                     pass
@@ -138,10 +153,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass
         finally:
-            self.server.subscribers.unsubscribe(events)
+            self.server.subscribers.unsubscribe(jumps)
 
-    def write_event(self, name, data):
-        self.wfile.write(f'event: {name}\ndata: {json.dumps(data)}\n\n'.encode())
+    def write_event(self, name, data, event_id=None):
+        id_line = f'id: {event_id}\n' if event_id is not None else ''
+        self.wfile.write(f'event: {name}\n{id_line}data: {json.dumps(data)}\n\n'.encode())
         self.wfile.flush()
 
     def do_POST(self):
