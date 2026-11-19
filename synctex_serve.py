@@ -24,6 +24,7 @@ import urllib.request
 
 EVENTS_PATH = '/.synctex/events'
 FORWARD_PATH = '/.synctex/forward'
+INVERSE_PATH = '/.synctex/inverse'
 # A PDF is announced once its size and modification time hold for one interval: latexmk writes it over the whole
 # run, and a viewer that loads it midway gets a truncated file.
 SETTLE_SECONDS = 0.3
@@ -46,6 +47,8 @@ class Subscribers:
         self.pdf_paths = {}
         self.latest_jumps = {}
 
+    # The stream's queue and the id of its start, which the stream sends first: a viewer that has received no jump yet
+    # still reconnects with an id, and the jumps published while it was away are newer.
     def subscribe(self, pdf_path, seen_jump_id):
         jumps = queue.Queue()
         with self.lock:
@@ -53,7 +56,8 @@ class Subscribers:
             latest = self.latest_jumps.get(pdf_path)
             if seen_jump_id is not None and latest is not None and latest[0] > seen_jump_id:
                 jumps.put(latest)
-        return jumps
+            connect_id = time.time_ns()
+        return jumps, connect_id
 
     def unsubscribe(self, jumps):
         with self.lock:
@@ -96,6 +100,25 @@ def synctex_view(line, column, tex, pdf):
                       for left, top, width, height in sorted(boxes, key=lambda box: (box[1], box[0]))]
 
 
+# The source file and line typeset at a point of a page, in PDF points from its top-left corner.
+def synctex_edit(page_num, x, y, pdf):
+    output = subprocess.run(['synctex', 'edit', '-o', f'{page_num}:{x}:{y}:{pdf}'],
+                            capture_output=True, text=True, timeout=10).stdout
+    fields = dict(row.partition(':')[::2] for row in output.splitlines())
+    if 'Input' not in fields or 'Line' not in fields:
+        return None
+    return os.path.normpath(fields['Input']), int(fields['Line'])
+
+
+# Puts the nvim listening on a socket on a source line, through vimtex, which opens the file if it is not open.
+def nvim_inverse_search(nvim_socket, tex, line):
+    tex_literal = "'" + tex.replace("'", "''") + "'"
+    result = subprocess.run(['nvim', '--server', nvim_socket, '--remote-expr',
+                             f'vimtex#view#inverse_search({line}, {tex_literal})'],
+                            capture_output=True, text=True, timeout=5)
+    return result.returncode == 0
+
+
 class Handler(http.server.SimpleHTTPRequestHandler):
 
     def do_GET(self):
@@ -126,11 +149,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.send_response(200)
         self.send_header('Content-Type', 'text/event-stream')
         self.end_headers()
-        self.wfile.write(f'retry: {RECONNECT_MS}\n\n'.encode())
         file_path = self.translate_path(pdf_path)
         last_event_id = self.headers.get('Last-Event-ID')
         seen_jump_id = int(last_event_id) if last_event_id and last_event_id.isdigit() else None
-        jumps = self.server.subscribers.subscribe(pdf_path, seen_jump_id)
+        jumps, connect_id = self.server.subscribers.subscribe(pdf_path, seen_jump_id)
+        # An id with no data sets the browser's last event id without dispatching an event.
+        self.wfile.write(f'retry: {RECONNECT_MS}\nid: {connect_id}\n\n'.encode())
         sent_stamp = seen_stamp = None
         last_write = time.monotonic()
         try:
@@ -161,22 +185,46 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.wfile.flush()
 
     def do_POST(self):
-        if urllib.parse.urlsplit(self.path).path != FORWARD_PATH:
-            self.send_json(404, {'error': 'not found'})
-            return
+        url_path = urllib.parse.urlsplit(self.path).path
         request = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+        if url_path == FORWARD_PATH:
+            self.forward(request)
+        elif url_path == INVERSE_PATH:
+            self.inverse(request)
+        else:
+            self.send_json(404, {'error': 'not found'})
+
+    def forward(self, request):
+        if request.get('nvim'):
+            self.server.nvim_socket = request['nvim']
         pdf_rel_path = os.path.relpath(request['pdf'], self.directory)
         if pdf_rel_path.startswith('..'):
             self.send_json(400, {'error': f'{request["pdf"]} is outside the served directory {self.directory}'})
             return
         found = synctex_view(request['line'], request['column'], request['tex'], request['pdf'])
         if found is None:
-            self.send_json(404, {'error': f'synctex finds no box for {request["tex"]}:{request["line"]}'})
+            self.send_json(404, {'error': f'no box for {os.path.basename(request["tex"])}:{request["line"]} in the PDF'})
             return
         page_num, boxes = found
         pdf_path = '/' + urllib.parse.quote(pdf_rel_path)
         num_viewers = self.server.subscribers.publish(pdf_path, {'page': page_num, 'boxes': boxes})
         self.send_json(200, {'page': page_num, 'pdf_path': pdf_path, 'num_viewers': num_viewers})
+
+    # A viewer's double tap: the source line typeset at the point, opened in the nvim that last ran a forward search.
+    def inverse(self, request):
+        found = synctex_edit(request['page'], request['x'], request['y'], self.translate_path(request['pdf_path']))
+        if found is None:
+            self.send_json(404, {'error': 'no source here'})
+            return
+        tex, line = found
+        tex_name = f'{os.path.basename(tex)}:{line}'
+        if self.server.nvim_socket is None:
+            self.send_json(409, {'error': f'{tex_name}, no editor attached: press \\lv in nvim'})
+            return
+        if not nvim_inverse_search(self.server.nvim_socket, tex, line):
+            self.send_json(409, {'error': f'{tex_name}, the editor is gone: press \\lv in nvim'})
+            return
+        self.send_json(200, {'tex': tex, 'line': line, 'message': f'→ {tex_name}'})
 
     def send_json(self, code, data):
         body = json.dumps(data).encode()
@@ -204,6 +252,7 @@ def serve(argv):
     handler = functools.partial(Handler, directory=args.directory)
     with http.server.ThreadingHTTPServer((args.bind, args.port), handler) as server:
         server.subscribers = Subscribers()
+        server.nvim_socket = None
         print(f'Serving {os.path.abspath(args.directory)} at http://{args.bind}:{args.port}/', flush=True)
         server.serve_forever()
 
@@ -219,25 +268,57 @@ def forward(argv):
     args = parser.parse_args(argv)
 
     pdf = os.path.abspath(args.pdf)
-    request = json.dumps({'line': args.line, 'column': args.column, 'tex': os.path.abspath(args.tex), 'pdf': pdf})
+    # $NVIM is the socket of the nvim that started this, e.g. through vimtex: inverse search jumps in that nvim.
+    request = json.dumps({'line': args.line, 'column': args.column, 'tex': os.path.abspath(args.tex), 'pdf': pdf,
+                          'nvim': os.environ.get('NVIM')})
     host = '127.0.0.1' if args.bind == '0.0.0.0' else args.bind
     url = f'http://{host}:{args.port}{FORWARD_PATH}'
     try:
-        print(post_json(url, request))
-        return
+        result = json.loads(post_forward(url, request, os.path.dirname(pdf), args.port, args.bind))
+    except OSError as error:
+        result = {'error': f'server on port {args.port} unreachable: {error}'}
+    message, level = forward_message(result)
+    print(message)
+    nvim_notify(os.environ.get('NVIM'), message, level)
+
+
+# Posts a forward search, starting the server if none answers on the port.
+def post_forward(url, request, directory, port, bind):
+    try:
+        return post_json(url, request)
     except urllib.error.URLError as error:
         if not isinstance(error.reason, ConnectionRefusedError):
             raise
-    start_detached_server(os.path.dirname(pdf), args.port, args.bind)
+    start_detached_server(directory, port, bind)
     deadline = time.monotonic() + SERVER_START_SECONDS
     while True:
         try:
-            print(post_json(url, request))
-            return
+            return post_json(url, request)
         except urllib.error.URLError as error:
             if not isinstance(error.reason, ConnectionRefusedError) or time.monotonic() > deadline:
                 raise
             time.sleep(0.1)
+
+
+# A forward search's outcome for the editor. No viewer connected is not a failure: a tab iOS suspended while the
+# terminal was in front gets the jump when it reconnects.
+def forward_message(result):
+    if 'error' in result:
+        return f'\\lv: {result["error"]}', 'WARN'
+    if result['num_viewers'] == 0:
+        return f'\\lv → page {result["page"]}, waiting for a viewer to reconnect', 'INFO'
+    viewers = 'viewer' if result['num_viewers'] == 1 else 'viewers'
+    return f'\\lv → page {result["page"]}, sent to {result["num_viewers"]} {viewers}', 'INFO'
+
+
+# Shows a message in the nvim listening on a socket, if any, through vim.notify (the message line and :messages).
+def nvim_notify(nvim_socket, message, level):
+    if not nvim_socket:
+        return
+    message_literal = "'" + message.replace("'", "''") + "'"
+    subprocess.run(['nvim', '--server', nvim_socket, '--remote-expr',
+                    f"luaeval('vim.notify(_A[1], vim.log.levels[_A[2]])', [{message_literal}, '{level}'])"],
+                   capture_output=True, timeout=5)
 
 
 def post_json(url, body):

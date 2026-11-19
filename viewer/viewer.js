@@ -276,6 +276,70 @@ function jump(target) {
   }
 }
 
+// Inverse search: a double tap, or a double click, on a page puts the editor on the source line typeset there. The
+// point flashes, and the bar says where the editor went or why it could not.
+const DOUBLE_TAP_MS = 350;
+const TAP_MOVE_PX = 12;
+const INVERSE_PATH = '/.synctex/inverse';
+let tapStart = null;
+let lastTap = null;
+let lastInverseAt = 0;
+
+async function inverse(clientX, clientY) {
+  lastInverseAt = Date.now();
+  const page = pages.find(p => {
+    const rect = p.el.getBoundingClientRect();
+    return clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom;
+  });
+  if (!page || !page.proxy) return;
+  const rect = page.el.getBoundingClientRect();
+  const base = page.proxy.getViewport({ scale: 1 });
+  const x = (clientX - rect.left) / rect.width * base.width;
+  const y = (clientY - rect.top) / rect.height * base.height;
+  const marker = document.createElement('div');
+  marker.className = 'synctex-box';
+  Object.assign(marker.style, { left: 'calc(' + x / base.width * 100 + '% - 6px)', top: 'calc(' + y / base.height * 100 + '% - 6px)',
+                                width: '12px', height: '12px', borderRadius: '50%' });
+  page.el.append(marker);
+  setTimeout(() => marker.remove(), FLASH_MS);
+  try {
+    const response = await fetch(INVERSE_PATH, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pdf_path: location.pathname, page: pages.indexOf(page) + 1, x, y }),
+    });
+    const result = await response.json();
+    statusEl.textContent = result.message || result.error;
+  } catch (error) {
+    statusEl.textContent = 'server unreachable';
+  }
+}
+
+pagesEl.addEventListener('dblclick', event => {
+  if (Date.now() - lastInverseAt > 1000) inverse(event.clientX, event.clientY);
+});
+
+// A tap is one finger down and up without moving; two of them close in time and place make a double tap.
+addEventListener('touchstart', event => {
+  tapStart = event.touches.length === 1
+    ? { x: event.touches[0].clientX, y: event.touches[0].clientY, time: Date.now() } : null;
+}, { passive: true });
+
+addEventListener('touchend', event => {
+  if (tapStart === null || event.touches.length !== 0) return;
+  const touch = event.changedTouches[0];
+  const tap = { x: touch.clientX, y: touch.clientY, time: Date.now() };
+  const moved = Math.hypot(tap.x - tapStart.x, tap.y - tapStart.y) > TAP_MOVE_PX;
+  tapStart = null;
+  if (moved) return;
+  if (lastTap && tap.time - lastTap.time < DOUBLE_TAP_MS && Math.hypot(tap.x - lastTap.x, tap.y - lastTap.y) < 3 * TAP_MOVE_PX) {
+    lastTap = null;
+    inverse(tap.x, tap.y);
+  } else {
+    lastTap = tap;
+  }
+});
+
 // The server announces the PDF once it has settled after each change, and forward searches; the browser reconnects
 // on its own after a drop, e.g. when iOS suspends the tab.
 function listen() {
