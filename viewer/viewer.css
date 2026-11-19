@@ -1,0 +1,18 @@
+html, body { height: 100%; overflow: hidden; touch-action: pan-x pan-y; }
+body { margin: 0; background: #525659; color: #eee; font: 14px system-ui, sans-serif; }
+#hud { position: fixed; top: 0; left: 0; z-index: 1; font-size: 14px;
+       display: flex; flex-direction: column; align-items: flex-end; }
+#bar { display: flex; gap: 0.57em; align-items: center;
+       padding: 0.43em 0.71em; background: rgba(0, 0, 0, 0.65); border-bottom-left-radius: 0.43em; }
+#bar button { font: inherit; min-width: 2.3em; padding: 0.07em 0.43em; border-width: 0.14em; border-radius: 0.3em; }
+/* The pages scroll in a box of their own the size of the screen: a document wider than the screen would widen
+   a mobile browser's layout viewport, which then zooms out to fit it, instead of scrolling. */
+#scroller { position: fixed; inset: 0; overflow: auto; -webkit-overflow-scrolling: touch; }
+#pages { width: max-content; min-width: 100%; box-sizing: border-box; padding: 12px 8px; }
+.page { position: relative; margin: 0 auto 12px; background: #fff; box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5); }
+.page canvas { display: block; width: 100%; height: 100%; }
+.page canvas.detail { position: absolute; }
+/* A forward search's boxes, over the canvases (a detail canvas is appended after them), fading out. */
+.synctex-box { position: absolute; z-index: 1; pointer-events: none; background: rgba(255, 196, 0, 0.45);
+               animation: synctex-flash 2s ease-out forwards; }
+@keyframes synctex-flash { 0%, 50% { opacity: 1; } 100% { opacity: 0; } }
