@@ -32,6 +32,8 @@ KEEPALIVE_SECONDS = 15
 # How soon a viewer reconnects after its stream drops, e.g. when its tab comes back from the background.
 RECONNECT_MS = 500
 SERVER_START_SECONDS = 5
+DEFAULT_BIND = '127.0.0.1'
+DEFAULT_PORT = 8000
 
 VIEWER_DIR = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'viewer')
 VIEWER_PATH = '/.synctex/'
@@ -243,10 +245,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             super().log_request(code, size)
 
 
-def serve(argv):
+def serve(argv, config):
     parser = argparse.ArgumentParser(description='Serve a directory; PDFs open in a viewer that reloads on change.')
     parser.add_argument('directory', nargs='?', default='.')
-    add_address_args(parser)
+    add_address_args(parser, config)
     args = parser.parse_args(argv)
 
     handler = functools.partial(Handler, directory=args.directory)
@@ -257,14 +259,14 @@ def serve(argv):
         server.serve_forever()
 
 
-def forward(argv):
+def forward(argv, config):
     parser = argparse.ArgumentParser(prog='synctex-serve forward',
                                      description='Scroll the viewers of a PDF to the box typeset from a source line.')
     parser.add_argument('line', type=int)
     parser.add_argument('column', type=int)
     parser.add_argument('tex')
     parser.add_argument('pdf')
-    add_address_args(parser)
+    add_address_args(parser, config)
     args = parser.parse_args(argv)
 
     pdf = os.path.abspath(args.pdf)
@@ -340,16 +342,44 @@ def start_detached_server(directory, port, bind):
                          stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
 
 
-def add_address_args(parser):
-    parser.add_argument('--port', type=int, default=8000)
-    parser.add_argument('--bind', default='127.0.0.1', help='address to listen on, e.g. a Tailscale IP or 0.0.0.0')
+def load_config():
+    config_home = os.environ.get('XDG_CONFIG_HOME', os.path.expanduser('~/.config'))
+    path = os.path.join(config_home, 'synctex-serve', 'config.json')
+    try:
+        with open(path) as file:
+            config = json.load(file)
+    except FileNotFoundError:
+        config = {}
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f'cannot load {path}: {error}') from error
+    if not isinstance(config, dict):
+        raise ValueError(f'{path}: expected a JSON object')
+    unknown = set(config) - {'bind', 'port'}
+    if unknown:
+        raise ValueError(f'{path}: unknown keys: {", ".join(sorted(unknown))}')
+    bind = config.get('bind', DEFAULT_BIND)
+    port = config.get('port', DEFAULT_PORT)
+    if not isinstance(bind, str) or not bind:
+        raise ValueError(f'{path}: bind must be a non-empty string')
+    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+        raise ValueError(f'{path}: port must be an integer from 1 to 65535')
+    return {'bind': bind, 'port': port}
+
+
+def add_address_args(parser, config):
+    parser.add_argument('--port', type=int, default=config['port'])
+    parser.add_argument('--bind', default=config['bind'], help='address to listen on, e.g. a Tailscale IP or 0.0.0.0')
 
 
 def main():
+    try:
+        config = load_config()
+    except ValueError as error:
+        sys.exit(f'synctex-serve: {error}')
     if sys.argv[1:2] == ['forward']:
-        forward(sys.argv[2:])
+        forward(sys.argv[2:], config)
     else:
-        serve(sys.argv[1:])
+        serve(sys.argv[1:], config)
 
 
 if __name__ == '__main__':

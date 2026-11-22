@@ -15,6 +15,21 @@ synctex-serve [dir] [--port=8000] [--bind=127.0.0.1]
 Open `http://<host>:<port>/<file>.pdf`. Bind a Tailscale IP (or `0.0.0.0` inside a tailnet-only network) to read it
 from another device.
 
+## Address configuration
+
+Server startup and forward search read an optional `$XDG_CONFIG_HOME/synctex-serve/config.json`, or
+`~/.config/synctex-serve/config.json` when `XDG_CONFIG_HOME` is unset:
+
+```json
+{
+  "bind": "100.100.100.100",
+  "port": 8000
+}
+```
+
+Explicit `--bind` and `--port` arguments override the file; otherwise its values override the defaults `127.0.0.1` and
+`8000`. Keep the file machine-local, so editor configuration can use the same command on every machine.
+
 ## Install
 
 ```bash
@@ -44,7 +59,7 @@ With vimtex, `\lv` does it:
 ```lua
 vim.g.vimtex_view_method = "general"
 vim.g.vimtex_view_general_viewer = "synctex-serve"
-vim.g.vimtex_view_general_options = "forward @line @col @tex @pdf --bind=0.0.0.0"
+vim.g.vimtex_view_general_options = "forward @line @col @tex @pdf"
 ```
 
 Run from nvim, `forward` reports its outcome in nvim's message line (`vim.notify`): the page and how many viewers got
